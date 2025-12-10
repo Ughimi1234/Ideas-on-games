@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Ping Pong — HTML5 Canvas</title>
+<style>
+  :root{
+    --bg:#0b1220;
+    --panel:#0f1724;
+    --accent:#39d;
+    --muted:#9aa;
+    --white:#eaf2ff;
+  }
+  html,body{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial;}
+  body{background:linear-gradient(180deg,var(--bg),#08101a); display:flex; align-items:center; justify-content:center; color:var(--white)}
+  .wrap{width:min(980px,96vw); max-width:980px; background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(0,0,0,0.12)); border-radius:12px; padding:18px; box-shadow:0 8px 30px rgba(0,0,0,0.6); }
+  header{display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:8px;}
+  h1{font-size:18px;margin:0;color:var(--white);letter-spacing:0.4px}
+  .controls{display:flex; gap:8px; align-items:center; flex-wrap:wrap;}
+  button{background:transparent;color:var(--white);border:1px solid rgba(255,255,255,0.08); padding:8px 12px;border-radius:8px;cursor:pointer}
+  button.primary{background:var(--accent); color:white; border:none}
+  button:active{transform:translateY(1px)}
+  .row{display:flex; gap:10px; align-items:center}
+  .status{color:var(--muted); font-size:13px}
+  canvas{display:block; width:100%; background:linear-gradient(180deg,#06182a55,#00000055); border-radius:8px; touch-action:none; }
+  footer{display:flex; justify-content:space-between; margin-top:10px; color:var(--muted); font-size:13px}
+  .kbd{font-family:monospace;background:rgba(255,255,255,0.03); padding:2px 6px;border-radius:4px; border:1px solid rgba(255,255,255,0.02)}
+  @media (max-width:520px){ h1{font-size:16px} }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Ping Pong — HTML5 Canvas</h1>
+    <div class="controls">
+      <div class="row">
+        <button id="toggleAI" title="Toggle AI / 2-player">AI: <b id="aiLabel">ON</b></button>
+        <button id="pauseBtn">Pause</button>
+        <button id="restartBtn" class="primary">Restart</button>
+      </div>
+      <div style="width:12px"></div>
+      <div class="status">Left: <span class="kbd">W/S</span> &nbsp;Right: <span class="kbd">↑/↓</span> &nbsp;Space to Pause</div>
+    </div>
+  </header>
+
+  <canvas id="c" width="900" height="480" role="img" aria-label="Ping pong game"></canvas>
+
+  <footer>
+    <div>Score — <span id="scoreLeft">0</span> : <span id="scoreRight">0</span></div>
+    <div id="hint">Touch & drag paddles on mobile</div>
+  </footer>
+</div>
+
+<script>
+/* Ping Pong — single-file game
+   - Copy into ping-pong.html
+   - Open in any modern browser
+*/
+(() => {
+  // Canvas setup
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', {alpha:false});
+  const scoreLeftEl = document.getElementById('scoreLeft');
+  const scoreRightEl = document.getElementById('scoreRight');
+  const toggleAIBtn = document.getElementById('toggleAI');
+  const aiLabel = document.getElementById('aiLabel');
+  const pauseBtn = document.getElementById('pauseBtn');
+  const restartBtn = document.getElementById('restartBtn');
+
+  // Responsive canvas while keeping internal resolution stable
+  function resizeCanvas() {
+    const ratio = canvas.width / canvas.height;
+    const w = Math.min(980, Math.max(360, window.innerWidth * 0.96));
+    const h = Math.round(w / ratio);
+    canvas.style.width = w + 'px';
+    canvas.style.height = h + 'px';
+  }
+  window.addEventListener('resize', resizeCanvas);
+  resizeCanvas();
+
+  // Game state
+  const state = {
+    left: {x: 20, y: 190, w: 12, h: 100, vy: 0, speed: 6},
+    right: {x: canvas.width - 32, y: 190, w: 12, h: 100, vy: 0, speed: 6},
+    ball: {x: canvas.width/2, y: canvas.height/2, r: 8, vx: 6*(Math.random() < 0.5 ? 1 : -1), vy: 2*(Math.random()>0.5?1:-1)},
+    score: {left: 0, right: 0},
+    running: true,
+    ai: true,
+    lastTime: 0,
+    speedMultiplier: 1,
+    maxScore: 11,
+    serveDelay: 800 // ms pause before serve
+  };
+
+  // Audio: lightweight beep sounds using WebAudio
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  const audio = AudioCtx ? new AudioCtx() : null;
+  function beep(freq = 440, time = 0.06, type = 'sine', gain = 0.08){
+    if(!audio) return;
+    const o = audio.createOscillator();
+    const g = audio.createGain();
+    o.type = type; o.frequency.value = freq;
+    g.gain.value = gain;
+    o.connect(g); g.connect(audio.destination);
+    o.start();
+    o.stop(audio.currentTime + time);
+  }
+
+  // Controls
+  const keys = {};
+  window.addEventListener('keydown', e => {
+    if(e.code === 'Space'){ e.preventDefault(); togglePause(); return; }
+    if(e.code === 'KeyR'){ restart(); return; }
+    keys[e.code] = true;
+  });
+  window.addEventListener('keyup', e => { keys[e.code] = false; });
+
+  // Touch controls: allow dragging left or right half paddles
+  let dragging = null;
+  function getCanvasRect(){ return canvas.getBoundingClientRect(); }
+  canvas.addEventListener('pointerdown', e => {
+    const r = getCanvasRect();
+    const x = (e.clientX - r.left) * (canvas.width / r.width);
+    const y = (e.clientY - r.top) * (canvas.height / r.height);
+    if (x < canvas.width/2) dragging = {side:'left', offsetY: y - state.left.y};
+    else dragging = {side:'right', offsetY: y - state.right.y};
+    canvas.setPointerCapture(e.pointerId);
+  });
+  canvas.addEventListener('pointermove', e => {
+    if(!dragging) return;
+    const r = getCanvasRect();
+    const y = (e.clientY - r.top) * (canvas.height / r.height);
+    const targetY = y - dragging.offsetY;
+    if(dragging.side === 'left'){
+      state.left.y = Math.max(0, Math.min(canvas.height - state.left.h, targetY));
+    } else {
+      state.right.y = Math.max(0, Math.min(canvas.height - state.right.h, targetY));
+    }
+  });
+  canvas.addEventListener('pointerup', e => { dragging = null; });
+
+  // Buttons
+  toggleAIBtn.addEventListener('click', () => {
+    state.ai = !state.ai;
+    aiLabel.textContent = state.ai ? 'ON' : 'OFF';
+    toggleAIBtn.classList.toggle('primary', state.ai);
+  });
+  pauseBtn.addEventListener('click', togglePause);
+  restartBtn.addEventListener('click', restart);
+
+  function togglePause(){
+    state.running = !state.running;
+    pauseBtn.textContent = state.running ? 'Pause' : 'Resume';
+    state.lastTime = performance.now();
+  }
+
+  function restart(){
+    state.score.left = 0; state.score.right = 0;
+    resetPositions(true);
+    updateScoreUI();
+    state.running = true;
+    pauseBtn.textContent = 'Pause';
+  }
+
+  function resetPositions(fullReset=false){
+    state.left.y = (canvas.height - state.left.h)/2;
+    state.right.y = (canvas.height - state.right.h)/2;
+    state.ball.x = canvas.width/2;
+    state.ball.y = canvas.height/2;
+    state.speedMultiplier = 1;
+    // random serve direction
+    state.ball.vx = 6 * (Math.random() < 0.5 ? 1 : -1) * state.speedMultiplier;
+    state.ball.vy = (Math.random()*3 - 1.5) * state.speedMultiplier;
+    if(fullReset){
+      state.left.speed = 6;
+      state.right.speed = 6;
+    }
+  }
+
+  function updateScoreUI(){
+    scoreLeftEl.textContent = state.score.left;
+    scoreRightEl.textContent = state.score.right;
+  }
+
+  // Collision helpers
+  function rectIntersectsBall(pad, ball){
+    return ball.x - ball.r < pad.x + pad.w &&
+           ball.x + ball.r > pad.x &&
+           ball.y - ball.r < pad.y + pad.h &&
+           ball.y + ball.r > pad.y;
+  }
+
+  // Game loop
+  function step(ts){
+    if(!state.lastTime) state.lastTime = ts;
+    const dt = Math.min(40, ts - state.lastTime); // ms, clamp to avoid big jumps
+    state.lastTime = ts;
+    if(state.running){
+      // Player controls
+      // Left: W/S
+      if(keys['KeyW']) state.left.y -= state.left.speed;
+      if(keys['KeyS']) state.left.y += state.left.speed;
+      // Right: ArrowUp/ArrowDown (only if not AI)
+      if(!state.ai){
+        if(keys['ArrowUp']) state.right.y -= state.right.speed;
+        if(keys['ArrowDown']) state.right.y += state.right.speed;
+      } else {
+        // Simple AI: follow ball with easing + max speed, but allow mistakes
+        const center = state.right.y + state.right.h/2;
+        const dy = state.ball.y - center;
+        const aiSpeed = Math.min(state.right.speed * 0.95 + Math.abs(state.ball.vx)*0.15, 8 * state.speedMultiplier);
+        state.right.y += Math.sign(dy) * Math.min(Math.abs(dy), aiSpeed);
+      }
+
+      // Keep paddles in bounds
+      state.left.y = Math.max(0, Math.min(canvas.height - state.left.h, state.left.y));
+      state.right.y = Math.max(0, Math.min(canvas.height - state.right.h, state.right.y));
+
+      // Move ball
+      state.ball.x += state.ball.vx * (dt/16);
+      state.ball.y += state.ball.vy * (dt/16);
+
+      // Top/bottom bounce
+      if(state.ball.y - state.ball.r <= 0){
+        state.ball.y = state.ball.r;
+        state.ball.vy *= -1;
+        beep(880, 0.04);
+      } else if (state.ball.y + state.ball.r >= canvas.height){
+        state.ball.y = canvas.height - state.ball.r;
+        state.ball.vy *= -1;
+        beep(880, 0.04);
+      }
+
+      // Paddle collisions
+      if(rectIntersectsBall(state.left, state.ball) && state.ball.vx < 0){
+        // reflect with angle based on where it hit the paddle
+        const relY = (state.ball.y - (state.left.y + state.left.h/2)) / (state.left.h/2);
+        const bounce = relY * 4;
+        state.ball.vx = Math.abs(state.ball.vx) + 0.4; // speed up a bit
+        state.ball.vy = bounce;
+        // slightly nudge ball away to avoid sticking
+        state.ball.x = state.left.x + state.left.w + state.ball.r + 0.5;
+        beep(1200, 0.03);
+        increaseDifficulty();
+      } else if (rectIntersectsBall(state.right, state.ball) && state.ball.vx > 0){
+        const relY = (state.ball.y - (state.right.y + state.right.h/2)) / (state.right.h/2);
+        const bounce = relY * 4;
+        state.ball.vx = -Math.abs(state.ball.vx) - 0.4;
+        state.ball.vy = bounce;
+        state.ball.x = state.right.x - state.ball.r - 0.5;
+        beep(1200, 0.03);
+        increaseDifficulty();
+      }
+
+      // Score check
+      if(state.ball.x + state.ball.r < 0){
+        // Right scores
+        state.score.right += 1;
+        updateScoreUI();
+        beep(210, 0.12, 'square', 0.12);
+        serveAfterDelay(-1);
+      } else if (state.ball.x - state.ball.r > canvas.width){
+        // Left scores
+        state.score.left += 1;
+        updateScoreUI();
+        beep(210, 0.12, 'square', 0.12);
+        serveAfterDelay(1);
+      }
+    }
+
+    draw();
+    requestAnimationFrame(step);
+  }
+
+  function serveAfterDelay(servingDir){
+    state.running = false;
+    pauseBtn.textContent = 'Resume';
+    setTimeout(() => {
+      // reset ball near center and send toward the side who conceded (servingDir param picks direction)
+      resetPositions(false);
+      // ensure ball starts toward the player who lost the point (so winner serves toward)
+      if(servingDir) state.ball.vx = 6 * servingDir * state.speedMultiplier;
+      state.running = true;
+      pauseBtn.textContent = 'Pause';
+    }, state.serveDelay);
+  }
+
+  function increaseDifficulty(){
+    // gently increase speed multiplier over time and after collisions, but cap it
+    state.speedMultiplier = Math.min(2.4, state.speedMultiplier + 0.0025);
+    // update ball velocities to reflect multiplier
+    const signX = Math.sign(state.ball.vx) || 1;
+    state.ball.vx = signX * Math.max(4, Math.abs(state.ball.vx)) * (1 + state.speedMultiplier*0.06);
+    state.ball.vy *= 1 + state.speedMultiplier*0.02;
+  }
+
+  // Drawing
+  function drawNet(){
+    ctx.fillStyle = 'rgba(255,255,255,0.07)';
+    const step = 14;
+    for(let y=10; y<canvas.height; y+=step){
+      ctx.fillRect(canvas.width/2 - 2, y, 4, 8);
+    }
+  }
+
+  function draw(){
+    // background
+    ctx.fillStyle = '#04121a';
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+
+    // subtle court shading
+    const grd = ctx.createLinearGradient(0,0,0,canvas.height);
+    grd.addColorStop(0, 'rgba(255,255,255,0.01)');
+    grd.addColorStop(1, 'rgba(255,255,255,0.03)');
+    ctx.fillStyle = grd;
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+
+    // net
+    drawNet();
+
+    // paddles
+    ctx.fillStyle = '#dfeeff';
+    roundRectFill(ctx, state.left.x, state.left.y, state.left.w, state.left.h, 6);
+    roundRectFill(ctx, state.right.x, state.right.y, state.right.w, state.right.h, 6);
+
+    // ball with glow
+    const b = state.ball;
+    const glow = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, b.r*6);
+    glow.addColorStop(0, 'rgba(255,255,255,0.95)');
+    glow.addColorStop(0.25, 'rgba(57,141,255,0.18)');
+    glow.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = glow;
+    ctx.beginPath(); ctx.arc(b.x, b.y, b.r*6, 0, Math.PI*2); ctx.fill();
+
+    ctx.fillStyle = '#eaf2ff';
+    ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, Math.PI*2); ctx.fill();
+
+    // scores (big)
+    ctx.fillStyle = 'rgba(255,255,255,0.07)';
+    ctx.font = '120px serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(state.score.left, canvas.width*0.25, 120);
+    ctx.fillText(state.score.right, canvas.width*0.75, 120);
+
+    // small UI overlay
+    ctx.fillStyle = 'rgba(255,255,255,0.06)';
+    ctx.font = '12px system-ui, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText(`Speed: ${state.speedMultiplier.toFixed(2)}`, 10, canvas.height - 10);
+    ctx.textAlign = 'right';
+    ctx.fillText(state.ai ? 'AI ON' : 'AI OFF', canvas.width - 10, canvas.height - 10);
+  }
+
+  function roundRectFill(ctx, x, y, w, h, r){
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // Init
+  resetPositions(true);
+  updateScoreUI();
+  requestAnimationFrame(step);
+
+  // expose simple helpers (for dev console)
+  window.pingpong = {state, resetPositions, restart, togglePause};
+})();
+</script>
+</body>
+</html>
