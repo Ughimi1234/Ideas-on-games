@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ultimate Juicy Ping Pong</title>
+<style>
+:root{--bg:#0b1220;--accent:#39d;--white:#eaf2ff;}
+html,body{margin:0;height:100%;display:flex;justify-content:center;align-items:center;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;background:var(--bg);color:var(--white);}
+.wrap{width:min(980px,96vw);max-width:980px;position:relative;}
+canvas{display:block;width:100%;border-radius:8px;touch-action:none;}
+.menu,.submenu,.settings{position:absolute;top:0;left:0;width:100%;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(0,0,0,0.5);}
+.menu h1,.submenu h2,.settings h2{font-size:48px;margin-bottom:40px;opacity:0;transform:scale(0.8);transition:opacity 0.5s, transform 0.5s;}
+.menu button,.submenu button,.settings button,.settings input,.settings select{margin:5px;padding:10px 20px;font-size:18px;border-radius:8px;border:none;cursor:pointer;background:var(--accent);color:#fff;opacity:0;transform:scale(0.8);transition:transform 0.2s, opacity 0.3s;}
+.menu button:hover,.submenu button:hover,.settings button:hover{transform:scale(1.05);}
+.menu button.active,.submenu button.active,.settings button.active{transform:scale(1.1);}
+.achievement{position:absolute;top:20px;left:50%;transform:translateX(-50%);background:#39d;padding:10px 20px;border-radius:8px;opacity:0;transition:opacity 0.5s, transform 0.5s;}
+</style>
+</head>
+<body>
+<div class="wrap">
+<canvas id="c" width="900" height="480"></canvas>
+
+<!-- Main Menu -->
+<div class="menu" id="menu">
+<h1 id="title">Ultimate Juicy Ping Pong</h1>
+<button data-action="start">Start Game</button>
+<button data-action="mode">Choose Mode</button>
+<button data-action="training">Training</button>
+<button data-action="highscores">High Scores</button>
+<button data-action="settings">Settings</button>
+</div>
+
+<!-- Submenu for Mode Selection -->
+<div class="submenu" id="submenu" style="display:none;">
+<h2>Select Mode</h2>
+<button data-mode="Classic">Classic</button>
+<button data-mode="PowerUp">Power-Up</button>
+<button data-mode="Boss">Boss</button>
+<button id="backMenu">Back</button>
+</div>
+
+<!-- Settings -->
+<div class="settings" id="settings" style="display:none;">
+<h2>Settings & Customizations</h2>
+<label>Player 1 Name: <input id="p1Name" type="text" value="Player 1"></label>
+<label>Player 2 Name: <input id="p2Name" type="text" value="Player 2"></label>
+<label>Paddle Color P1: <input type="color" id="p1Color" value="#00ffff"></label>
+<label>Paddle Color P2: <input type="color" id="p2Color" value="#ff00ff"></label>
+<label>Ball Color: <input type="color" id="ballColor" value="#00ffff"></label>
+<label>Theme:
+<select id="themeSelect">
+<option value="neon">Neon</option>
+<option value="retro">Retro</option>
+<option value="pixel">Pixel</option>
+<option value="galaxy">Galaxy</option>
+</select></label>
+<label>Ball Size: <input type="number" id="ballSize" min="4" max="20" value="8"></label>
+<label>Paddle Size: <input type="number" id="paddleSize" min="40" max="200" value="100"></label>
+<label>Game Speed: <input type="number" id="gameSpeed" min="0.5" max="3" step="0.1" value="1"></label>
+<button id="saveSettings">Save</button>
+<button id="closeSettings">Back</button>
+</div>
+
+</div>
+<script>
+// Canvas
+const canvas=document.getElementById('c'),ctx=canvas.getContext('2d');
+
+// Menu Elements
+const menu=document.getElementById('menu');
+const submenu=document.getElementById('submenu');
+const settings=document.getElementById('settings');
+const title=document.getElementById('title');
+
+// Game State
+let gameState='menu';
+let selectedMenuIndex=0;
+let selectedSubIndex=0;
+const menuButtons=Array.from(menu.querySelectorAll('button'));
+const subButtons=Array.from(submenu.querySelectorAll('button')).filter(b=>b.id!=='backMenu');
+
+// Player / Game State
+const state={
+left:{x:20,y:190,w:12,h:100,vy:0,speed:6,skin:'#0ff',stretch:1},
+right:{x:canvas.width-32,y:190,w:12,h:100,vy:0,speed:6,skin:'#f0f',stretch:1},
+ball:{x:canvas.width/2,y:canvas.height/2,r:8,color:'#0ff',vx:6*(Math.random()<0.5?1:-1),vy:2*(Math.random()>0.5?1:-1),trail:[]},
+balls:[],score:{left:0,right:0},ai:true,speedMultiplier:1,shake:0,
+mode:'Classic',powerUps:[],difficulty:'Normal',maxScore:10,
+player1Name:'Player 1',player2Name:'Player 2',theme:'neon'
+};
+
+// Audio
+const AudioCtx=window.AudioContext||window.webkitAudioContext;
+const audio=AudioCtx?new AudioCtx():null;
+function playSound(type){if(!audio)return;const now=audio.currentTime;const o=audio.createOscillator(), g=audio.createGain();g.gain.setValueAtTime(0.08,now);o.connect(g);g.connect(audio.destination);switch(type){case'paddle':o.type='square';o.frequency.setValueAtTime(150,now);g.gain.exponentialRampToValueAtTime(0.001,now+0.1);break;case'fast':o.type='sine';o.frequency.setValueAtTime(700,now);g.gain.exponentialRampToValueAtTime(0.001,now+0.05);break;case'score':[400,550,660].forEach(f=>{const osc=audio.createOscillator(),gain=audio.createGain();gain.gain.setValueAtTime(0.06,now);osc.connect(gain);gain.connect(audio.destination);osc.type='triangle';osc.frequency.setValueAtTime(f,now);osc.start(now);osc.stop(now+0.25);});return;}o.start(now);o.stop(now+0.2);}
+
+// --- Menu Logic ---
+menuButtons.forEach((btn,i)=>{setTimeout(()=>{btn.style.opacity='1';btn.style.transform='scale(1)';},i*150);});
+submenu.querySelectorAll('button').forEach((btn,i)=>{setTimeout(()=>{btn.style.opacity='1';btn.style.transform='scale(1)';},i*150);});
+
+// Menu Navigation
+function updateMenuHighlight(){menuButtons.forEach((btn,i)=>btn.classList.toggle('active',i===selectedMenuIndex));}
+function updateSubHighlight(){subButtons.forEach((btn,i)=>btn.classList.toggle('active',i===selectedSubIndex));}
+
+// Keyboard navigation
+window.addEventListener('keydown',e=>{
+if(gameState==='menu'){
+if(e.code==='ArrowDown'){selectedMenuIndex=(selectedMenuIndex+1)%menuButtons.length;updateMenuHighlight();}
+if(e.code==='ArrowUp'){selectedMenuIndex=(selectedMenuIndex-1+menuButtons.length)%menuButtons.length;updateMenuHighlight();}
+if(e.code==='Enter'){activateMenu(menuButtons[selectedMenuIndex].dataset.action);}}
+if(gameState==='submenu'){
+if(e.code==='ArrowDown'){selectedSubIndex=(selectedSubIndex+1)%subButtons.length;updateSubHighlight();}
+if(e.code==='ArrowUp'){selectedSubIndex=(selectedSubIndex-1+subButtons.length)%subButtons.length;updateSubHighlight();}
+if(e.code==='Enter'){activateSub(subButtons[selectedSubIndex].dataset.mode);}}
+});
+
+function activateMenu(action){
+switch(action){
+case'start':startGame();break;
+case'mode':menu.style.display='none';submenu.style.display='flex';gameState='submenu';updateSubHighlight();break;
+case'settings':menu.style.display='none';settings.style.display='flex';gameState='settings';break;
+}
+}
+
+function activateSub(mode){state.mode=mode;submenu.style.display='none';startGame();}
+document.getElementById('backMenu').addEventListener('click',()=>{submenu.style.display='none';menu.style.display='flex';gameState='menu';});
+
+// --- Settings Save ---
+document.getElementById('saveSettings').addEventListener('click',()=>{
+state.player1Name=document.getElementById('p1Name').value;
+state.player2Name=document.getElementById('p2Name').value;
+state.left.skin=document.getElementById('p1Color').value;
+state.right.skin=document.getElementById('p2Color').value;
+state.ball.color=document.getElementById('ballColor').value;
+state.theme=document.getElementById('themeSelect').value;
+state.ball.r=parseInt(document.getElementById('ballSize').value);
+state.left.h=parseInt(document.getElementById('paddleSize').value);
+state.right.h=parseInt(document.getElementById('paddleSize').value);
+state.speedMultiplier=parseFloat(document.getElementById('gameSpeed').value);
+localStorage.setItem('pongSettings',JSON.stringify(state));alert('Settings saved!');});
+document.getElementById('closeSettings').addEventListener('click',()=>{settings.style.display='none';menu.style.display='flex';gameState='menu';});
+
+// --- Game Start ---
+function startGame(){gameState='playing';menu.style.display='none';submenu.style.display='none';settings.style.display='none';resetPositions();requestAnimationFrame(gameLoop);}
+function resetPositions(){state.left.y=(canvas.height-state.left.h)/2;state.right.y=(canvas.height-state.right.h)/2;state.ball.x=canvas.width/2;state.ball.y=canvas.height/2;state.ball.vx=6*(Math.random()<0.5?1:-1);state.ball.vy=(Math.random()*3-1.5);state.balls=[{...state.ball}];}
+
+// --- Controls ---
+const keys={};window.addEventListener('keydown',e=>keys[e.code]=true);window.addEventListener('keyup',e=>keys[e.code]=false);
+
+// --- AI ---
+function moveAI(){if(!state.ai) return;let targetY=state.balls[0].y-state.right.h/2;const speed={Easy:2,Normal:4,Hard:6,Insane:10}[state.difficulty]||4;state.right.y+=Math.sign(targetY-state.right.y)*speed;state.right.y=Math.max(0,Math.min(canvas.height-state.right.h,state.right.y));}
+
+// --- Game Loop ---
+function gameLoop(){
+if(gameState!=='playing') return;
+ctx.fillStyle=state.theme==='retro'?'#111':'#0b1220';ctx.fillRect(0,0,canvas.width,canvas.height);
+
+// Player Movement & Paddle Stretch
+['left','right'].forEach(p=>{
+const pad=state[p];
+let move=(p==='left'?(keys['KeyS']?1:keys['KeyW']?-1:0):(keys['ArrowDown']?1:keys['ArrowUp']?-1:0));
+pad.y+=pad.speed*move;
+pad.y=Math.max(0,Math.min(canvas.height-pad.h,pad.y));
+pad.stretch=1+Math.abs(move)*0.3;
+});
+
+// AI
+moveAI();
+
+// Balls Update & Draw with Trail
+state.balls.forEach(ball=>{
+ball.x+=ball.vx*state.speedMultiplier;
+ball.y+=ball.vy*state.speedMultiplier;
+
+// Wall bounce
+if(ball.y-ball.r<0||ball.y+ball.r>canvas.height){ball.vy*=-1;playSound('fast');flashBall(ball);}
+
+// Paddle collision
+function paddleCollision(pad){if(ball.x-ball.r<pad.x+pad.w&&ball.x+ball.r>pad.x&&ball.y>pad.y&&ball.y<pad.y+pad.h){ball.vx*=-1;state.shake=5;playSound('paddle');flashBall(ball);}}
+paddleCollision(state.left);paddleCollision(state.right);
+
+// Score
+if(ball.x<0){state.score.right++;resetPositions();playSound('score');state.shake=10;}
+if(ball.x>canvas.width){state.score.left++;resetPositions();playSound('score');state.shake=10;}
+
+// Trail
+ball.trail.push({x:ball.x,y:ball.y});
+if(ball.trail.length>10)ball.trail.shift();
+ctx.strokeStyle=ball.color;ctx.lineWidth=2;ctx.beginPath();
+for(let i=0;i<ball.trail.length;i++){ctx.globalAlpha=i/ball.trail.length;ctx.lineTo(ball.trail[i].x,ball.trail[i].y);}ctx.stroke();ctx.globalAlpha=1;
+
+// Draw Ball
+ctx.fillStyle=ball.color;ctx.beginPath();ctx.arc(ball.x,ball.y,ball.r,0,Math.PI*2);ctx.fill();
+});
+
+// Draw Paddles
+['left','right'].forEach(p=>{
+const pad=state[p];
+ctx.fillStyle=pad.skin;
+ctx.fillRect(pad.x,pad.y-pad.h*(pad.stretch-1)/2,pad.w,pad.h*pad.stretch);
+});
+
+// Screen Shake
+if(state.shake>0){ctx.save();ctx.translate(Math.random()*state.shake*2-state.shake,Math.random()*state.shake*2-state.shake);state.shake--;}
+
+requestAnimationFrame(gameLoop);
+if(state.shake>0)ctx.restore();
+}
+
+// Ball flash effect
+function flashBall(ball){ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(ball.x,ball.y,ball.r+2,0,Math.PI*2);ctx.fill();}
+</script>
+</body>
+</html>
