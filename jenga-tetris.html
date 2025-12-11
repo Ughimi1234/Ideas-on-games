@@ -1,0 +1,565 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Jenga + Tetris — Tower Tumble</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  html,body { height:100%; margin:0; font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial; background:#0b1020; color:#e6eef8; display:flex; align-items:center; justify-content:center;}
+  #game { display:flex; gap:16px; align-items:flex-start; }
+  canvas { background:#081022; image-rendering:pixelated; border-radius:6px; box-shadow:0 6px 20px rgba(0,0,0,0.7); }
+  .ui { width:260px; }
+  .panel { background:linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.02)); padding:12px; border-radius:8px; margin-bottom:12px; box-shadow:inset 0 1px 0 rgba(255,255,255,0.02); }
+  h1 { margin:0 0 8px 0; font-size:18px; }
+  .labels { display:flex; justify-content:space-between; }
+  button, .control { display:inline-block; padding:8px 10px; border-radius:6px; background:#142033; color:#d9f0ff; border:1px solid rgba(255,255,255,0.03); cursor:pointer; margin-top:8px; }
+  .big { font-size:18px; padding:10px 14px; }
+  .hint { font-size:12px; color:#9fb6d0; margin-top:6px; }
+  #controls { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
+  .toggle { display:flex; gap:8px; align-items:center; }
+  .footer { font-size:12px; color:#9fb6d0; margin-top:8px; }
+  .boardContainer { display:flex; flex-direction:column; align-items:center; gap:8px; }
+  .nextBoard { background:#071026; padding:8px; border-radius:6px; }
+  .stat { font-weight:700; font-size:20px; color:#c6f0ff; }
+  .small { font-size:12px; color:#9fb6d0; }
+  a { color:#8ad0ff; text-decoration:none; }
+</style>
+</head>
+<body>
+<div id="game">
+  <div class="boardContainer">
+    <canvas id="board" width="240" height="480"></canvas>
+    <div class="panel" style="width:240px; text-align:center;">
+      <div class="labels">
+        <div>Mode: <strong id="modeLabel">Tetris</strong></div>
+        <div>Level: <span id="level">1</span></div>
+      </div>
+      <div style="margin-top:8px;">
+        <button id="toggleMode" class="big control">Switch to Jenga Mode</button>
+        <div class="hint">In Jenga Mode: click one block to pull it out (if allowed).</div>
+      </div>
+      <div id="message" class="hint"></div>
+    </div>
+  </div>
+
+  <div class="ui">
+    <div class="panel">
+      <h1>Tower Tumble — Jenga + Tetris</h1>
+      <div class="labels"><div>Score</div><div class="stat" id="score">0</div></div>
+      <div class="labels"><div>Lines</div><div class="stat" id="lines">0</div></div>
+      <div class="labels" style="margin-top:8px;"><div>Pulls</div><div class="stat" id="pulls">0</div></div>
+      <div class="small" style="margin-top:8px;">Objective: place falling pieces to build, clear lines for points, or switch modes and pull blocks like Jenga to destabilize the tower. If any block reaches the top row, game over.</div>
+    </div>
+
+    <div class="panel">
+      <div>Next piece</div>
+      <div class="nextBoard" id="nextCanvas"></div>
+      <div id="controls" style="margin-top:10px;">
+        <div class="control">← move</div>
+        <div class="control">→ move</div>
+        <div class="control">↑ rotate</div>
+        <div class="control">↓ soft drop</div>
+        <div class="control">space hard drop</div>
+        <div class="control">P pause</div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="toggle">
+        <button id="startBtn" class="control big">Start Game</button>
+        <button id="resetBtn" class="control">Reset</button>
+      </div>
+      <div class="footer">Made for you — have fun! Click board in Jenga mode to pull blocks.</div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+/*
+  Tower Tumble — Jenga meets Tetris
+  - Classic tetrominoes, grid-based.
+  - Switch to Jenga Mode to click a single occupied cell to remove it (if removable).
+  - Removability rule (simple heuristic): a block is removable if it has at least one horizontal neighbor empty (left or right) OR no block directly above it that would be unsupported by anything else (to avoid removing a block that is sandwiched).
+  - After removal, gravity is applied per column (blocks fall straight down into empty spots).
+  - Lines still clear as regular Tetris (full row removed).
+  - Score: line clears + successful pulls. Game over if any cell in top row occupied after a piece locks or after gravity resolves.
+*/
+
+// Configuration
+const COLS = 10;
+const ROWS = 20;
+const CELL = 24;            // pixels per cell on board canvas
+const START_SPEED = 800;    // ms per drop (level 1)
+const SPEED_STEP = 60;      // speed up per level
+const LINES_PER_LEVEL = 10;
+const PULL_SCORE = 50;
+const LINE_SCORES = [0,40,100,300,1200]; // classic tetris scoring for 0..4 lines
+
+// Canvas and contexts
+const boardCanvas = document.getElementById('board');
+boardCanvas.width = COLS * CELL;
+boardCanvas.height = ROWS * CELL;
+const ctx = boardCanvas.getContext('2d');
+
+const nextCanvasDiv = document.getElementById('nextCanvas');
+
+// UI elements
+const scoreEl = document.getElementById('score');
+const linesEl = document.getElementById('lines');
+const pullsEl = document.getElementById('pulls');
+const levelEl = document.getElementById('level');
+const startBtn = document.getElementById('startBtn');
+const resetBtn = document.getElementById('resetBtn');
+const toggleMode = document.getElementById('toggleMode');
+const modeLabel = document.getElementById('modeLabel');
+const messageEl = document.getElementById('message');
+
+let mode = 'Tetris'; // or 'Jenga'
+let running = false;
+let paused = false;
+
+// Game state
+let grid; // ROWS x COLS (row 0 top)
+let currentPiece, nextPiece;
+let currentX, currentY, currentRotation;
+let dropTimer = null;
+let dropInterval = START_SPEED;
+let lastTime = 0;
+let score = 0, lines = 0, pulls = 0, level = 1;
+
+// Tetromino definitions (4x4 matrices)
+const TETROMINOES = {
+  I: { color: '#7be7ff', shapes: [
+    [[0,0,0,0],[1,1,1,1],[0,0,0,0],[0,0,0,0]],
+    [[0,0,1,0],[0,0,1,0],[0,0,1,0],[0,0,1,0]]
+  ]},
+  J: { color: '#7b9bff', shapes: [
+    [[1,0,0],[1,1,1],[0,0,0]],
+    [[0,1,1],[0,1,0],[0,1,0]],
+    [[0,0,0],[1,1,1],[0,0,1]],
+    [[0,1,0],[0,1,0],[1,1,0]]
+  ]},
+  L: { color: '#ffb87b', shapes: [
+    [[0,0,1],[1,1,1],[0,0,0]],
+    [[0,1,0],[0,1,0],[0,1,1]],
+    [[0,0,0],[1,1,1],[1,0,0]],
+    [[1,1,0],[0,1,0],[0,1,0]]
+  ]},
+  O: { color: '#ffd57b', shapes: [
+    [[1,1],[1,1]]
+  ]},
+  S: { color: '#7bff9b', shapes: [
+    [[0,1,1],[1,1,0],[0,0,0]],
+    [[0,1,0],[0,1,1],[0,0,1]]
+  ]},
+  Z: { color: '#ff7b7b', shapes: [
+    [[1,1,0],[0,1,1],[0,0,0]],
+    [[0,0,1],[0,1,1],[0,1,0]]
+  ]},
+  T: { color: '#d37bff', shapes: [
+    [[0,1,0],[1,1,1],[0,0,0]],
+    [[0,1,0],[0,1,1],[0,1,0]],
+    [[0,0,0],[1,1,1],[0,1,0]],
+    [[0,1,0],[1,1,0],[0,1,0]]
+  ]}
+};
+const PIECE_KEYS = Object.keys(TETROMINOES);
+
+// Helpers
+function emptyGrid() {
+  return Array.from({length: ROWS}, () => Array(COLS).fill(0));
+}
+function cloneGrid(g) { return g.map(r => r.slice()); }
+function randPiece() {
+  const k = PIECE_KEYS[Math.floor(Math.random()*PIECE_KEYS.length)];
+  const def = TETROMINOES[k];
+  return {
+    key: k,
+    color: def.color,
+    shapes: def.shapes
+  };
+}
+function rotateShape(shape) {
+  const R = shape.length, C = shape[0].length;
+  const out = Array.from({length:C}, ()=>Array(R).fill(0));
+  for (let r=0;r<R;r++) for (let c=0;c<C;c++) out[c][R-1-r] = shape[r][c];
+  return out;
+}
+function drawCell(x,y,color,ctxLocal) {
+  const xpx = x*CELL;
+  const ypx = y*CELL;
+  const c = ctxLocal || ctx;
+  c.fillStyle = color;
+  c.fillRect(xpx+1, ypx+1, CELL-2, CELL-2);
+  // subtle bevel
+  c.strokeStyle = 'rgba(255,255,255,0.06)';
+  c.lineWidth = 1;
+  c.strokeRect(xpx+1, ypx+1, CELL-2, CELL-2);
+}
+
+// Piece functions
+function getCurrentShape() {
+  const shapes = currentPiece.shapes;
+  let s = shapes[currentRotation % shapes.length];
+  return s;
+}
+function canPlace(shape, x, y, g=grid) {
+  for (let r=0;r<shape.length;r++) for (let c=0;c<shape[r].length;c++){
+    if (!shape[r][c]) continue;
+    const gx = x + c, gy = y + r;
+    if (gx < 0 || gx >= COLS || gy < 0 || gy >= ROWS) return false;
+    if (g[gy][gx]) return false;
+  }
+  return true;
+}
+function placePieceToGrid(shape, x, y, g=grid) {
+  for (let r=0;r<shape.length;r++) for (let c=0;c<shape[r].length;c++){
+    if (!shape[r][c]) continue;
+    const gx = x + c, gy = y + r;
+    if (gy >= 0 && gy < ROWS && gx >= 0 && gx < COLS) g[gy][gx] = { color: currentPiece.color, key: currentPiece.key };
+  }
+}
+
+function spawnPiece() {
+  currentPiece = nextPiece || randPiece();
+  nextPiece = randPiece();
+  currentRotation = 0;
+  // start roughly centered at top
+  const shape = getCurrentShape();
+  currentX = Math.floor((COLS - shape[0].length) / 2);
+  currentY = -shape.length + 1;
+  if (!canPlace(shape, currentX, currentY)) {
+    // game over
+    gameOver();
+  } else {
+    renderNext();
+  }
+}
+
+// Gravity (apply for entire grid after a removal)
+function applyGravityToGrid(g) {
+  for (let col=0; col<COLS; col++){
+    let write = ROWS-1;
+    for (let r=ROWS-1;r>=0;r--){
+      if (g[r][col]) {
+        if (write !== r) {
+          g[write][col] = g[r][col];
+          g[r][col] = 0;
+        }
+        write--;
+      }
+    }
+    // clear above
+    for (let r=write;r>=0;r--) g[r][col] = 0;
+  }
+}
+
+// Jenga removability heuristic
+function isRemovableAt(row,col) {
+  // must be occupied
+  if (!grid[row][col]) return false;
+  // can't remove top of tower (the very top block of that column) if it's the topmost block? We allow but let's be cautious:
+  // Rule: removable if at least one horizontal neighbor (left or right) is empty OR the cell above is empty (not supporting anything).
+  const leftEmpty = (col-1<0) ? true : !grid[row][col-1];
+  const rightEmpty = (col+1>=COLS) ? true : !grid[row][col+1];
+  const aboveEmpty = (row-1<0) ? true : !grid[row-1][col];
+  // Also ensure the block is not the only block in its column and has at least one same-level neighbor or empty side
+  return leftEmpty || rightEmpty || aboveEmpty;
+}
+
+// Line clearing (standard)
+function clearFullLines(g) {
+  let cleared = 0;
+  for (let r=ROWS-1;r>=0;r--){
+    if (g[r].every(cell => cell !== 0)) {
+      g.splice(r,1);
+      g.unshift(Array(COLS).fill(0));
+      cleared++;
+      r++; // re-check this row index after shift
+    }
+  }
+  if (cleared>0) {
+    score += LINE_SCORES[cleared] * level;
+    lines += cleared;
+    level = Math.floor(lines / LINES_PER_LEVEL) + 1;
+    updateUI();
+  }
+  return cleared;
+}
+
+// Game loop & dropping
+function startDrop() {
+  if (dropTimer) clearInterval(dropTimer);
+  dropInterval = Math.max(80, START_SPEED - (level-1)*SPEED_STEP);
+  dropTimer = setInterval(() => {
+    if (!running || paused) return;
+    stepDrop();
+  }, dropInterval);
+}
+function stepDrop() {
+  const shape = getCurrentShape();
+  if (canPlace(shape, currentX, currentY+1)) {
+    currentY++;
+  } else {
+    // lock piece
+    placePieceToGrid(shape, currentX, currentY);
+    clearFullLines(grid);
+    spawnPiece();
+    // After lock, check game over top
+    if (grid[0].some(cell => cell)) {
+      gameOver();
+    }
+  }
+  draw();
+}
+
+function hardDrop() {
+  const shape = getCurrentShape();
+  while (canPlace(shape, currentX, currentY+1)) currentY++;
+  stepDrop();
+}
+
+// Rendering
+function clearCanvas() {
+  ctx.fillStyle = '#081022';
+  ctx.fillRect(0,0,boardCanvas.width, boardCanvas.height);
+}
+function drawGrid(g=grid) {
+  clearCanvas();
+  // background grid lines
+  ctx.strokeStyle = 'rgba(255,255,255,0.03)';
+  ctx.lineWidth = 1;
+  for (let x=0;x<=COLS;x++){
+    ctx.beginPath();
+    ctx.moveTo(x*CELL,0);
+    ctx.lineTo(x*CELL,ROWS*CELL);
+    ctx.stroke();
+  }
+  for (let y=0;y<=ROWS;y++){
+    ctx.beginPath();
+    ctx.moveTo(0,y*CELL);
+    ctx.lineTo(COLS*CELL,y*CELL);
+    ctx.stroke();
+  }
+  // placed blocks
+  for (let r=0;r<ROWS;r++) for (let c=0;c<COLS;c++){
+    const cell = g[r][c];
+    if (cell) {
+      drawCell(c,r,cell.color);
+    }
+  }
+  // current falling piece
+  if (currentPiece) {
+    const s = getCurrentShape();
+    for (let r=0;r<s.length;r++) for (let c=0;c<s[r].length;c++){
+      if (!s[r][c]) continue;
+      const gx = currentX + c, gy = currentY + r;
+      if (gy >= 0) drawCell(gx, gy, currentPiece.color);
+    }
+  }
+}
+function draw() { drawGrid(grid); }
+function renderNext(){
+  // create a small canvas
+  nextCanvasDiv.innerHTML = '';
+  const nc = document.createElement('canvas');
+  nc.width = 4*CELL; nc.height = 4*CELL;
+  nextCanvasDiv.appendChild(nc);
+  const nctx = nc.getContext('2d');
+  nctx.fillStyle = '#071026';
+  nctx.fillRect(0,0,nc.width,nc.height);
+  const s = nextPiece.shapes[0];
+  for (let r=0;r<s.length;r++) for (let c=0;c<s[r].length;c++){
+    if (s[r][c]) {
+      const x = c*CELL + CELL/2;
+      const y = r*CELL + CELL/2;
+      nctx.fillStyle = nextPiece.color;
+      nctx.fillRect(c*CELL+2, r*CELL+2, CELL-4, CELL-4);
+    }
+  }
+}
+
+// Controls and events
+document.addEventListener('keydown', (e) => {
+  if (!running) return;
+  if (e.key === 'ArrowLeft') {
+    const s = getCurrentShape();
+    if (canPlace(s, currentX-1, currentY)) { currentX--; draw(); }
+  } else if (e.key === 'ArrowRight') {
+    const s = getCurrentShape();
+    if (canPlace(s, currentX+1, currentY)) { currentX++; draw(); }
+  } else if (e.key === 'ArrowUp') {
+    // rotate
+    currentRotation = (currentRotation + 1) % currentPiece.shapes.length;
+    if (!canPlace(getCurrentShape(), currentX, currentY)) {
+      // wall kick simple: try shifting left/right
+      if (canPlace(getCurrentShape(), currentX-1, currentY)) currentX--;
+      else if (canPlace(getCurrentShape(), currentX+1, currentY)) currentX++;
+      else currentRotation = (currentRotation - 1 + currentPiece.shapes.length) % currentPiece.shapes.length;
+    }
+    draw();
+  } else if (e.key === 'ArrowDown') {
+    // soft drop
+    if (canPlace(getCurrentShape(), currentX, currentY+1)) currentY++;
+    draw();
+  } else if (e.key === ' ') {
+    hardDrop();
+    draw();
+  } else if (e.key.toLowerCase() === 'p') {
+    togglePause();
+  }
+});
+
+boardCanvas.addEventListener('click', (ev) => {
+  if (!running) return;
+  const rect = boardCanvas.getBoundingClientRect();
+  const x = Math.floor((ev.clientX - rect.left) / CELL);
+  const y = Math.floor((ev.clientY - rect.top) / CELL);
+  if (mode === 'Jenga') {
+    if (y<0 || y>=ROWS || x<0 || x>=COLS) return;
+    if (isRemovableAt(y,x)) {
+      // remove and apply gravity and score
+      grid[y][x] = 0;
+      applyGravityToGrid(grid);
+      pulls++;
+      score += PULL_SCORE;
+      updateUI();
+      messageEl.textContent = 'Pulled a block!';
+      // after gravity, check for line clears (rare)
+      clearFullLines(grid);
+      if (grid[0].some(cell => cell)) gameOver();
+      draw();
+    } else {
+      messageEl.textContent = 'That block is stuck — try another.';
+      setTimeout(()=>messageEl.textContent = '', 1200);
+    }
+  } else {
+    // in tetris mode, clicking toggles moving the piece to that column quickly (assist)
+    const desiredX = x - Math.floor(getCurrentShape()[0].length/2);
+    if (canPlace(getCurrentShape(), desiredX, currentY)) currentX = desiredX;
+    draw();
+  }
+});
+
+// UI buttons
+startBtn.addEventListener('click', () => {
+  if (!running) startGame();
+  else togglePause();
+});
+resetBtn.addEventListener('click', () => {
+  stopGame(true);
+});
+toggleMode.addEventListener('click', () => {
+  if (mode === 'Tetris') {
+    mode = 'Jenga';
+    modeLabel.textContent = 'Jenga';
+    toggleMode.textContent = 'Switch to Tetris Mode';
+  } else {
+    mode = 'Tetris';
+    modeLabel.textContent = 'Tetris';
+    toggleMode.textContent = 'Switch to Jenga Mode';
+  }
+  messageEl.textContent = '';
+});
+
+// Game lifecycle
+function startGame(){
+  grid = emptyGrid();
+  score = 0; lines = 0; pulls = 0; level = 1;
+  nextPiece = randPiece();
+  spawnPiece();
+  running = true;
+  paused = false;
+  startBtn.textContent = 'Pause (P)';
+  updateUI();
+  startDrop();
+  draw();
+}
+function stopGame(reset=false){
+  running = false;
+  if (dropTimer) { clearInterval(dropTimer); dropTimer = null; }
+  if (reset) {
+    grid = emptyGrid();
+    currentPiece = null; nextPiece = null;
+    score = 0; lines = 0; pulls = 0; level = 1;
+    updateUI();
+    draw();
+    startBtn.textContent = 'Start Game';
+  } else {
+    startBtn.textContent = 'Start Game';
+  }
+}
+function togglePause(){
+  if (!running) return;
+  paused = !paused;
+  startBtn.textContent = paused ? 'Resume' : 'Pause (P)';
+  messageEl.textContent = paused ? 'Paused' : '';
+}
+function gameOver(){
+  running = false;
+  if (dropTimer) { clearInterval(dropTimer); dropTimer = null; }
+  messageEl.textContent = 'Game Over — tower collapsed!';
+  startBtn.textContent = 'Start Game';
+}
+
+// UI updater
+function updateUI(){
+  scoreEl.textContent = score;
+  linesEl.textContent = lines;
+  pullsEl.textContent = pulls;
+  levelEl.textContent = level;
+  // adjust drop speed if playing
+  if (running && !paused) startDrop();
+}
+
+// initialize blank
+grid = emptyGrid();
+drawGrid(grid);
+renderNext();
+updateUI();
+
+// touch-friendly controls for mobile: simple swipe left/right for piece move, tap for rotate
+let touchStart = null;
+boardCanvas.addEventListener('touchstart', (e) => {
+  if (!running) return;
+  const t = e.touches[0];
+  touchStart = {x:t.clientX, y:t.clientY, time:Date.now()};
+});
+boardCanvas.addEventListener('touchend', (e) => {
+  if (!running || !touchStart) return;
+  const t = e.changedTouches[0];
+  const dx = t.clientX - touchStart.x;
+  const dy = t.clientY - touchStart.y;
+  if (Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy)) {
+    if (dx > 0) { // swipe right
+      const s = getCurrentShape();
+      if (canPlace(s, currentX+1, currentY)) currentX++;
+    } else {
+      const s = getCurrentShape();
+      if (canPlace(s, currentX-1, currentY)) currentX--;
+    }
+  } else if (Math.abs(dy) > 40 && Math.abs(dy) > Math.abs(dx)) {
+    if (dy > 0) { // swipe down
+      if (canPlace(getCurrentShape(), currentX, currentY+1)) currentY++;
+    } else { // swipe up = rotate
+      currentRotation = (currentRotation + 1) % currentPiece.shapes.length;
+      if (!canPlace(getCurrentShape(), currentX, currentY)) currentRotation = (currentRotation -1 + currentPiece.shapes.length)%currentPiece.shapes.length;
+    }
+  } else {
+    // tap: rotate
+    currentRotation = (currentRotation + 1) % currentPiece.shapes.length;
+    if (!canPlace(getCurrentShape(), currentX, currentY)) currentRotation = (currentRotation -1 + currentPiece.shapes.length)%currentPiece.shapes.length;
+  }
+  draw();
+  touchStart = null;
+});
+
+// small auto-save of state to allow immediate restart? Not necessary
+
+// Helpful: prevent scrolling on mobile when touching canvas
+document.body.addEventListener('touchmove', function(event){ if (event.target === boardCanvas) event.preventDefault(); }, { passive: false });
+
+</script>
+</body>
+</html>
